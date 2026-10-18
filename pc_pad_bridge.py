@@ -8,6 +8,7 @@ Only listens on the PC's loopback interface. No extra Python packages.
 import argparse
 import json
 import logging
+import select
 import socket
 import socketserver
 import time
@@ -26,38 +27,69 @@ class Stream(socketserver.BaseRequestHandler):
         self.request.settimeout(3)
         logging.info('Android viewer connected')
         device, caps = None, None
-        next_scan = sent = 0
-        last = None
+        next_scan = sent = next_sample = 0
+        last, sequence, detected_ns = None, 0, 0
+        pending = b''
         try:
             while True:
-                now = time.monotonic()
-                packet = {'source': 'PC TEST' if OPTIONS.demo else 'PC USB',
-                          'connected': False, 'signals': [], 'device': 'No pad connected'}
-                if OPTIONS.demo:
-                    steps = [[], ['B3'], [], ['B1', 'B4'], [], ['Y+'], [], ['B7']]
-                    packet.update(connected=True, signals=steps[int(now) % len(steps)], device='Synthetic bridge test')
-                else:
-                    if device is None and now >= next_scan:
-                        found = devices()
-                        match = next(((d, c) for d, c in found if (c.mid, c.pid) == (0x79, 6)), None)
-                        if match:
-                            device, caps = match
-                        next_scan = now + 1
-                    if device is not None:
-                        state = read_pad(device)
-                        if state is None:
-                            device, caps = None, None
-                        else:
-                            packet.update(connected=True, signals=sorted(signals(state, caps)),
-                                          device=f'{caps.name} [{caps.mid:04X}:{caps.pid:04X}]',
-                                          buttons=state.buttons, x=state.x, y=state.y, pov=state.pov)
-                encoded = json.dumps(packet, separators=(',', ':'))
-                if encoded != last or now - sent >= .5:
-                    self.request.sendall((encoded + '\n').encode('utf-8'))
-                    if encoded != last:
-                        logging.info('%s connected=%s active=%s', packet['source'], packet['connected'], packet['signals'])
-                    last, sent = encoded, now
-                time.sleep(1 / 120)
+                now = time.perf_counter()
+                if now >= next_sample:
+                    packet = {'source': 'PC TEST' if OPTIONS.demo else 'PC USB',
+                              'connected': False, 'signals': [], 'device': 'No pad connected'}
+                    if OPTIONS.demo:
+                        steps = [[], ['B3'], [], ['B1', 'B4'], [], ['Y+'], [], ['B7']]
+                        packet.update(connected=True, signals=steps[int(now) % len(steps)], device='Synthetic bridge test')
+                    else:
+                        if device is None and now >= next_scan:
+                            found = devices()
+                            match = next(((d, c) for d, c in found if (c.mid, c.pid) == (0x79, 6)), None)
+                            if match:
+                                device, caps = match
+                            next_scan = now + 1
+                        if device is not None:
+                            state = read_pad(device)
+                            if state is None:
+                                device, caps = None, None
+                            else:
+                                packet.update(connected=True, signals=sorted(signals(state, caps)),
+                                              device=f'{caps.name} [{caps.mid:04X}:{caps.pid:04X}]',
+                                              buttons=state.buttons, x=state.x, y=state.y, pov=state.pov)
+                    sampled_ns = time.perf_counter_ns()
+                    encoded = json.dumps(packet, separators=(',', ':'))
+                    changed = encoded != last
+                    if changed:
+                        sequence += 1
+                        detected_ns = sampled_ns
+                    if changed or now - sent >= .5:
+                        message = dict(packet, type='state', protocol=2, sequence=sequence,
+                                       pc_detected_ns=detected_ns, pc_sent_ns=time.perf_counter_ns())
+                        self.request.sendall((json.dumps(message, separators=(',', ':')) + '\n').encode('utf-8'))
+                        if changed:
+                            logging.info('%s seq=%s detected_ns=%s connected=%s active=%s',
+                                         packet['source'], sequence, detected_ns, packet['connected'], packet['signals'])
+                        last, sent = encoded, now
+                    next_sample = time.perf_counter() + 1 / 120
+                # Wake for clock-sync requests immediately, independently of the
+                # sampling interval. One thread owns all writes to this stream.
+                readable, _, _ = select.select([self.request], [], [], max(0, next_sample - time.perf_counter()))
+                if readable:
+                    data = self.request.recv(4096)
+                    received_ns = time.perf_counter_ns()
+                    if not data:
+                        return
+                    pending += data
+                    if len(pending) > 65536:
+                        return
+                    while b'\n' in pending:
+                        line, pending = pending.split(b'\n', 1)
+                        try:
+                            request = json.loads(line)
+                        except (ValueError, UnicodeDecodeError):
+                            continue
+                        if isinstance(request, dict) and request.get('type') == 'sync' and isinstance(request.get('id'), int):
+                            response = {'type': 'sync', 'protocol': 2, 'id': request['id'],
+                                        'pc_received_ns': received_ns, 'pc_sent_ns': time.perf_counter_ns()}
+                            self.request.sendall((json.dumps(response, separators=(',', ':')) + '\n').encode('utf-8'))
         except (OSError, ConnectionError):
             logging.info('Android viewer disconnected')
 

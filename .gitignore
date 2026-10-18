@@ -7,3 +7,5 @@ android-pad/.kotlin/
 android-pad/build/
 android-pad/app/build/
 android-pad/local.properties
+android-pad/timestamp-*.json
+android-pad/timestamp-*.png

@@ -22,4 +22,6 @@ USB hardware behavior cannot be verified until the adapter is available.
 
 The PC relay listens only on `127.0.0.1:8765`, reads the mat at 120 Hz, sends changes immediately, and sends heartbeats every half second. The app reconnects if the relay restarts and clears held signals if the stream times out. Run the launcher again after unplugging/reconnecting USB if forwarding was lost. The bridge affects this viewer only; it does not emulate a system-wide Android controller.
 
+Version 1.3 adds PC detection timestamps, periodic two-way clock synchronization, and timestamp-aware practice scoring. The viewer reports clock sync, RTT, estimated transit delay, and jitter. A bounded 250 ms arrival grace accepts in-flight events while the original Excellent/Good judgment windows remain unchanged. The initial held state on connection does not score. See the parent README for the protocol, accuracy limits, fallback behavior, and device checks.
+
 Relay diagnostics are in `../pad_bridge.log`. For a synthetic transport test, run `python pc_pad_bridge.py --demo` instead of the normal relay; the app labels this **PC TEST**.

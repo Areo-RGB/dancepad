@@ -10,6 +10,7 @@ import android.os.Bundle;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.SpannableString;
 import android.text.Spanned;
 import android.text.style.AbsoluteSizeSpan;
@@ -28,6 +29,8 @@ import android.widget.TextView;
 import android.widget.SeekBar;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.io.BufferedWriter;
+import java.io.OutputStreamWriter;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -39,6 +42,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.Set;
 
 /** Local controller viewer. Mock signals never leave this app. */
@@ -54,7 +58,8 @@ public class PadActivity extends Activity implements InputManager.InputDeviceLis
     private final Set<String> mock=new HashSet<>(), liveKeys=new HashSet<>(), liveAxes=new HashSet<>(), demo=new HashSet<>(), remote=new HashSet<>();
     private final Handler handler=new Handler(Looper.getMainLooper());
     private final TextView[] rawButtons=new TextView[12];
-    private TextView status,hint,activeText,rawText,lastText;
+    private TextView status,hint,activeText,rawText,lastText,timingText;
+    private String timingSummary="clock syncing";
     private Switch mockSwitch,bridgeSwitch;
     private volatile Socket bridgeSocket;
     private volatile int bridgeGeneration;
@@ -132,6 +137,7 @@ public class PadActivity extends Activity implements InputManager.InputDeviceLis
         for(int i=0;i<12;i++){TextView t=label("B"+(i+1),14,TEXT);t.setGravity(Gravity.CENTER);t.setMinHeight(dp(44));GridLayout.LayoutParams rp=new GridLayout.LayoutParams(GridLayout.spec(i/6),GridLayout.spec(i%6,1,1f));rp.width=0;rp.setMargins(dp(2),dp(2),dp(2),dp(2));raw.addView(t,rp);rawButtons[i]=t;}
         activeText=label("",17,LIME);details.addView(activeText);
         rawText=label("Axes: neutral",13,MUTED);rawText.setTypeface(Typeface.MONOSPACE);details.addView(rawText);
+        timingText=label("PC timing: bridge off",12,MUTED);details.addView(timingText);
         lastText=label(lastEvent,14,TEXT);details.addView(lastText);
         mapButton=control("Map real controller");details.addView(mapButton,new LinearLayout.LayoutParams(-1,dp(50)));
         mapButton.setOnClickListener(v->{stopDemo();mock.clear();mappingMode=!mappingMode;learning=null;paint();});
@@ -180,7 +186,8 @@ public class PadActivity extends Activity implements InputManager.InputDeviceLis
     }
     private void pulse(String signal){mock.add(signal);lastEvent="MOCK · pressed "+signal;paint();handler.postDelayed(()->{mock.remove(signal);paint();},250);}
     private void stopDemo(){demoRunning=false;handler.removeCallbacks(demoTick);demo.clear();if(demoButton!=null)demoButton.setText("Run demo");}
-    private void paint(){
+    private void paint(){paint(SystemClock.uptimeMillis());}
+    private void paint(long detectedAt){
         if(mockSwitch==null)return;
         Set<String> simulated=new HashSet<>(mock);simulated.addAll(demo);Set<String> real=new HashSet<>(liveKeys);real.addAll(liveAxes);
         Set<Integer> lanes=new HashSet<>();
@@ -200,10 +207,10 @@ public class PadActivity extends Activity implements InputManager.InputDeviceLis
         ArrayList<String> list=new ArrayList<>(all);java.util.Collections.sort(list);activeText.setText(list.isEmpty()?"No active signals":"Active: "+String.join(", ",list));lastText.setText(lastEvent);
         mapButton.setText(mappingMode?"Cancel mapping":"Map real controller");
         hint.setText(mappingMode?learning==null?"Tap the area you want to map.":"Press "+learning+" on the real controller.":demoRunning?"DEMO · automatic simulated presses":mockSwitch.isChecked()?"MOCK · hold pad areas, or try two fingers at once.":bridgeSwitch!=null&&bridgeSwitch.isChecked()?"BRIDGE · step on the mat connected to your PC.":"LIVE · waiting for real controller input.");updateDeviceStatus();
-        if(rhythm!=null)rhythm.setExternal(lanes);
+        if(rhythm!=null){rhythm.engine.setInputGrace(bridgeSwitch.isChecked()?RhythmEngine.MAX_BRIDGE_LATENESS:0);rhythm.setExternal(lanes,detectedAt);}
     }
     private void updateDeviceStatus(){
-        if(bridgeSwitch!=null&&bridgeSwitch.isChecked()){status.setText(bridgeStatus);if(gameSource!=null)gameSource.setText(bridgeStatus);return;}
+        if(bridgeSwitch!=null&&bridgeSwitch.isChecked()){status.setText(bridgeStatus);if(gameSource!=null)gameSource.setText(bridgeStatus+" · "+timingSummary);return;}
         ArrayList<String> connected=new ArrayList<>();for(int id:InputDevice.getDeviceIds()){InputDevice d=InputDevice.getDevice(id);if(d==null||d.isVirtual()||!d.isExternal())continue;if(d.supportsSource(InputDevice.SOURCE_GAMEPAD)||d.supportsSource(InputDevice.SOURCE_JOYSTICK))connected.add(d.getName());}
         status.setText(connected.isEmpty()?"No controller connected · mock pad ready":"Controller: "+String.join(", ",connected));
         if(gameSource!=null)gameSource.setText(connected.isEmpty()?"Touch practice · no controller connected":"Controller: "+String.join(", ",connected));
@@ -231,26 +238,55 @@ public class PadActivity extends Activity implements InputManager.InputDeviceLis
     private void startBridge(){
         stopBridge();
         final int generation=bridgeGeneration;
-        bridgeStatus="PC bridge · connecting…";updateDeviceStatus();
+        bridgeStatus="PC bridge · connecting…";timingSummary="clock syncing";timingText.setText("PC timing: synchronizing clocks…");updateDeviceStatus();
         Thread worker=new Thread(()->{
             while(generation==bridgeGeneration){
                 try(Socket socket=new Socket()){
                     bridgeSocket=socket;socket.setTcpNoDelay(true);socket.connect(new InetSocketAddress("127.0.0.1",8765),2000);socket.setSoTimeout(2000);
                     BufferedReader reader=new BufferedReader(new InputStreamReader(socket.getInputStream(),StandardCharsets.UTF_8));
+                    BufferedWriter writer=new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(),StandardCharsets.UTF_8));
+                    BridgeClock clock=new BridgeClock();Map<Long,Long> pendingPings=new HashMap<>();
+                    long nextPing=0,pingId=0,lastSequence=-1;boolean firstState=true;
                     String line;
-                    while(generation==bridgeGeneration&&(line=reader.readLine())!=null){
-                        JSONObject packet=new JSONObject(line);JSONArray array=packet.getJSONArray("signals");Set<String> next=new HashSet<>();
+                    while(generation==bridgeGeneration){
+                        long sendAt=SystemClock.uptimeMillis();
+                        if(sendAt>=nextPing){
+                            if(pendingPings.size()>16)pendingPings.clear();
+                            long id=++pingId;pendingPings.put(id,sendAt);
+                            writer.write(new JSONObject().put("type","sync").put("id",id).toString());writer.newLine();writer.flush();
+                            nextPing=sendAt+(clock.sampleCount()<8?150:2000);
+                        }
+                        line=reader.readLine();long receivedAt=SystemClock.uptimeMillis();if(line==null)break;
+                        JSONObject packet=new JSONObject(line);
+                        if(packet.optString("type").equals("sync")){
+                            Long sentAt=pendingPings.remove(packet.optLong("id",-1));
+                            if(sentAt!=null)clock.add(sentAt,packet.getLong("pc_received_ns")/1000000.0,packet.getLong("pc_sent_ns")/1000000.0,receivedAt);
+                            continue;
+                        }
+                        JSONArray array=packet.getJSONArray("signals");Set<String> next=new HashSet<>();
                         if(packet.optBoolean("connected"))for(int i=0;i<array.length();i++)next.add(array.getString(i));
                         String source=packet.optString("source","PC USB");
                         String nextStatus=packet.optBoolean("connected")?source+" bridge · connected · "+packet.optString("device"):"PC bridge connected · plug the mat into the PC";
-                        String raw=packet.has("x")?"PC X "+packet.optInt("x")+"   Y "+packet.optInt("y")+"\nPOV "+packet.optInt("pov"):source+" signals";
+                        boolean timestamped=packet.optInt("protocol")>=2&&packet.has("pc_detected_ns")&&packet.has("pc_sent_ns");
+                        if(timestamped)clock.observeTransit(packet.getLong("pc_sent_ns")/1000000.0,receivedAt);
+                        long sequence=packet.optLong("sequence",-1);boolean changed=sequence<0||sequence!=lastSequence;
+                        long detectedAt=timestamped&&clock.ready()?clock.androidTime(packet.getLong("pc_detected_ns")/1000000.0):receivedAt;
+                        long age=receivedAt-detectedAt;
+                        boolean invalidTime=timestamped&&clock.ready()&&(age>RhythmEngine.MAX_BRIDGE_LATENESS||age < -clock.uncertainty());
+                        final long eventAt=firstState||!changed||invalidTime?-1:Math.min(receivedAt,detectedAt);
+                        String summary=timestamped&&clock.ready()?String.format(Locale.US,"timestamped · ~%.1f ms transit",clock.transit()):timestamped?"clock syncing · arrival timing":"legacy relay · arrival timing";
+                        String diagnostics=timestamped&&clock.ready()?String.format(Locale.US,"PC clock synced · %d samples\nRTT %.1f ms · transit ~%.1f ms · jitter %.1f ms\nClock estimate ±%.1f ms · late limit %d ms",clock.sampleCount(),clock.rtt(),clock.transit(),clock.jitter(),clock.uncertainty(),RhythmEngine.MAX_BRIDGE_LATENESS):timestamped?"PC clock syncing · "+clock.sampleCount()+" samples · using arrival timing":"Relay has no timestamps · using arrival timing";
+                        String raw=(packet.has("x")?"PC X "+packet.optInt("x")+"   Y "+packet.optInt("y")+"\nPOV "+packet.optInt("pov"):source+" signals")+(timestamped?"\nEvent #"+sequence+" · PC ns "+packet.getLong("pc_detected_ns"):"");
+                        final boolean skipLate=changed&&!firstState&&invalidTime;
+                        lastSequence=sequence;firstState=false;
                         handler.post(()->{if(generation!=bridgeGeneration)return;
                             if(!remote.equals(next))lastEvent=source+" · "+(next.isEmpty()?"released": "active "+String.join(", ",next));
-                            remote.clear();remote.addAll(next);bridgeStatus=nextStatus;rawText.setText(raw);paint();
+                            if(skipLate)lastEvent=source+" · stale timestamp · excluded from scoring";
+                            remote.clear();remote.addAll(next);bridgeStatus=nextStatus;timingSummary=summary;rawText.setText(raw);timingText.setText(diagnostics);paint(eventAt);
                         });
                     }
                 }catch(Exception ignored){}
-                handler.post(()->{if(generation!=bridgeGeneration)return;remote.clear();bridgeStatus="PC bridge · reconnecting (check USB cable and PC relay)";paint();});
+                handler.post(()->{if(generation!=bridgeGeneration)return;remote.clear();bridgeStatus="PC bridge · reconnecting (check USB cable and PC relay)";timingSummary="clock sync reset";timingText.setText("PC timing: disconnected · resynchronizes on reconnect");paint(-1);});
                 try{Thread.sleep(1000);}catch(InterruptedException e){return;}
             }
         },"PC-pad-bridge");worker.setDaemon(true);worker.start();
@@ -259,6 +295,7 @@ public class PadActivity extends Activity implements InputManager.InputDeviceLis
         bridgeGeneration++;Socket socket=bridgeSocket;bridgeSocket=null;
         if(socket!=null)try{socket.close();}catch(Exception ignored){}
         remote.clear();
+        if(timingText!=null)timingText.setText("PC timing: bridge off");
     }
     @Override protected void onResume(){super.onResume();resumed=true;inputs.registerInputDeviceListener(this,handler);if(bridgeSwitch.isChecked())startBridge();updateDeviceStatus();}
     @Override protected void onPause(){super.onPause();resumed=false;if(rhythm!=null){rhythm.pause();pauseGame.setText("Resume");}inputs.unregisterInputDeviceListener(this);stopBridge();stopDemo();mock.clear();liveKeys.clear();liveAxes.clear();paint();}

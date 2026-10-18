@@ -41,7 +41,7 @@ Windows mappings save automatically in `pad_mapping.json` beside the Python scri
 
 ## Android app and mock mode
 
-**Dance Pad 1.2** is already installed on the Xiaomi Pad 7. `DancePad.apk` is a copy of the installable debug APK. To reinstall it:
+**Dance Pad 1.3** is already installed on the Xiaomi Pad 7. `DancePad.apk` is a copy of the installable debug APK. To reinstall it:
 
 ```powershell
 adb -s 4c637b9e install -r .\DancePad.apk
@@ -67,7 +67,29 @@ Tap **Play arrows · rhythm practice**, then **Start / Restart**. A three-second
 - Optional **Beat click** plays a quiet metronome using the tablet's media volume. No songs are bundled.
 - **Pad viewer** or Android Back returns to the diagnostic viewer.
 
-The practice screen uses the same bridged or directly connected controller input as the viewer. Touch controls are always available in practice. Timing uses the tablet's monotonic clock when an input arrives; hardware press timestamps and transport latency compensation are not implemented.
+The practice screen uses the same bridged or directly connected controller input as the viewer. Touch controls are always available in practice. Synchronized PC detection timestamps are used for bridged input once clock synchronization is ready. Local input and the synchronization warmup use tablet arrival timing.
+
+## Input timestamps and clock synchronization
+
+The PC relay records a high-resolution timestamp when it detects a changed controller state. On this Windows setup it uses Python's `perf_counter_ns()` (Windows QueryPerformanceCounter). These are PC detection times; the mat exposes no hardware press timestamp through the Windows API.
+
+Each bridge state packet includes protocol version 2, a sequence number, `pc_detected_ns`, and `pc_sent_ns`. A heartbeat repeats the same sequence number and detection timestamp, with a fresh send timestamp. A heartbeat therefore cannot replay a press. The PC log records the sequence and detection timestamp for changed states.
+
+The app sends periodic synchronization requests. The PC replies with its receive/send timestamps, and the tablet records its own send/receive times. After three valid samples, the app uses the lowest-round-trip sample in a rolling window to estimate the difference between PC and Android monotonic clocks. Synchronization continues during use and resets on reconnect.
+
+The viewer displays synchronization status, round-trip time (RTT), estimated one-way transit delay, recent transit jitter (max minus min over up to 32 packets), and an estimated clock uncertainty. One-way delay is an estimate: unequal send/return delays can bias clock alignment. The uncertainty display includes half the measured RTT plus 1 ms for Android timer resolution; it is not a guarantee of physical press accuracy.
+
+Rhythm scoring converts the PC detection timestamp into the tablet's game clock. Misses wait an additional **250 ms** for in-flight bridge events; this does not widen the 70 ms Excellent or 150 ms Good judgment windows. An event's detection time must still fall inside the original judgment window. Events more than 250 ms old, implausibly future-dated events, and packets predating the current round/resume cannot score. The first state after connection establishes a held-button baseline and does not score. An old relay or incomplete synchronization uses arrival timing, with that fallback shown in the viewer.
+
+After a successful hit, practice mode briefly shows its signed timing error (negative = early, positive = late) separately from the input delivery delay. Clock synchronization cannot remove USB polling/sensor delay before the PC detects a change.
+
+Tests include clock-origin conversion, high-RTT outliers, drift refresh, protocol heartbeats, malformed requests, delayed event scoring, stale/future/duplicate rejection, and pause/restart boundaries. To run the end-to-end check on the connected tablet:
+
+```powershell
+python tests\verify_timestamped_scoring.py
+```
+
+That check temporarily uses a clearly labelled PC TEST source, delivers a timestamped press 200 ms late, verifies its scoring on the tablet, then restores the real relay connection.
 
 Timing logic tests are in `android-pad/engine-tests/RhythmEngineTest.java` and can run with a standard JDK, without an emulator. They cover judgment boundaries, duplicate hits, wrong lanes, missed notes, pause/resume, tempo changes, round completion, and restart.
 
@@ -97,7 +119,7 @@ USB identifier: `VID_0079 / PID_0006`. Windows exposes 12 raw buttons; B11 and B
 | `pad_mapping.json` | Saved Windows area mappings |
 | `pc_pad_bridge.py` | Windows-to-Android signal relay; imports `pad_monitor.py` |
 | `start_pad_bridge.ps1` | Start the relay and configure USB forwarding |
-| `DancePad.apk` | Installable Android app, version 1.1 |
+| `DancePad.apk` | Installable Android app, version 1.3 |
 | `android-pad/` | Complete Android source and Gradle wrapper |
 | `pad_bridge.log` | Relay connection and signal diagnostics |
 | `extract_patterns.py` | Extract the real ITGmania SSC step charts into JSON |

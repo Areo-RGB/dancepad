@@ -19,6 +19,19 @@ public final class RhythmEngineTest {
         e.tick(20000);check(e.finished&&e.misses==32&&!e.running,"all missed run finishes");
         e.start(20000,60);check(e.score()==0&&e.combo==0&&!e.finished,"restart resets scores");
         check(e.notes.get(1).time==4000,"60 BPM spacing");
-        System.out.println("PASS: timing boundaries, wrong lanes, duplicate hits, misses, pause/resume, tempo, finish, restart");
+        e.setInputGrace(RhythmEngine.MAX_BRIDGE_LATENESS);e.start(0,80);
+        e.tick(3200);check(e.misses==0,"wait briefly for in-flight timestamped inputs");
+        check(e.press(0,3000,3220)&&e.excellent==1,"220 ms delayed arrival scores at PC detection time");
+        check(e.lastTimingErrorMs==0&&e.lastArrivalDelayMs==220,"timing and delivery diagnostics stay separate");
+        check(!e.press(0,3000,3221)&&e.excellent==1,"duplicate delayed event cannot score twice");
+        e.start(0,80);check(!e.press(0,3200,3250),"actually late detection is not rescued by grace");
+        e.tick(3401);check(e.misses==1,"miss finalized after bounded arrival grace");
+        e.start(0,80);check(!e.press(0,3000,3251),"over-age input rejected");
+        check(!e.press(0,3100,3000),"future timestamp rejected");
+        e.start(0,80);e.pause(2900);e.resume(4000);
+        check(!e.press(0,2890,4100),"packet from before resume cannot score in resumed timeline");
+        e.start(10000,80);check(!e.press(0,9900,10000),"old round packet cannot score after restart");
+        e.start(0,80);e.tick(27000);check(e.finished&&e.misses==32,"grace still allows a round to finish");
+        System.out.println("PASS: timing boundaries, delayed detection scoring, late/future/duplicate rejection, pause epochs, bounded misses, finish, restart");
     }
 }

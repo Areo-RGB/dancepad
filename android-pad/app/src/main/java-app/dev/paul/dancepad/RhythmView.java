@@ -14,6 +14,7 @@ import android.view.View;
 import android.view.accessibility.AccessibilityEvent;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.Locale;
 
 /** Four-lane practice field. Touch and physical inputs share edge-triggered scoring. */
 public final class RhythmView extends View {
@@ -35,14 +36,16 @@ public final class RhythmView extends View {
     public void resume(){engine.resume(SystemClock.uptimeMillis());previous.clear();previous.addAll(external);announceState();invalidate();}
     public void setClick(boolean enabled){click=enabled;if(enabled&&tone==null)try{tone=new ToneGenerator(AudioManager.STREAM_MUSIC,30);}catch(RuntimeException ignored){} }
     public void release(){if(tone!=null){tone.release();tone=null;} }
-    public void setExternal(Set<Integer> lanes){external.clear();external.addAll(lanes);checkEdges();}
-    private void checkEdges(){
+    public void setExternal(Set<Integer> lanes,long detectedAt){external.clear();external.addAll(lanes);checkEdges(detectedAt);}
+    private void checkEdges(long detectedAt){
         Set<Integer> active=new HashSet<>(external);active.addAll(touch);long now=SystemClock.uptimeMillis();
-        for(int lane:active)if(!previous.contains(lane)&&engine.press(lane,now))announceState();
+        // A negative timestamp establishes a baseline after connection, or
+        // displays an over-age packet without allowing it to score.
+        if(detectedAt>=0)for(int lane:active)if(!previous.contains(lane)&&engine.press(lane,Math.min(now,detectedAt),now))announceState();
         previous.clear();previous.addAll(active);invalidate();
     }
     private void announceState(){
-        setContentDescription("Rhythm practice: "+(!engine.started?"ready":engine.finished?"finished":engine.running?"running":"paused")+". "+engine.feedback+". Combo "+engine.combo+". Excellent "+engine.excellent+". Good "+engine.good+". Misses "+engine.misses+". Score "+engine.score());
+        setContentDescription("Rhythm practice: "+(!engine.started?"ready":engine.finished?"finished":engine.running?"running":"paused")+". "+engine.feedback+". Combo "+engine.combo+". Excellent "+engine.excellent+". Good "+engine.good+". Misses "+engine.misses+". Score "+engine.score()+". Timing error "+engine.lastTimingErrorMs+" ms. Delivery delay "+engine.lastArrivalDelayMs+" ms.");
         sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
     }
     @Override protected void onSizeChanged(int w,int h,int oldw,int oldh){
@@ -77,6 +80,7 @@ public final class RhythmView extends View {
         else{
             if(now-engine.feedbackAt<650){int color=engine.feedback.equals("MISS")?Color.rgb(255,109,130):engine.feedback.equals("GOOD")?Color.rgb(112,255,189):Color.rgb(255,226,88);text(c,engine.feedback,middle,h*.34f,32,color,true);}
             text(c,Integer.toString(engine.combo),middle,h*.43f,48,Color.WHITE,true);text(c,"COMBO",middle,h*.48f,12,Color.rgb(150,170,194),true);
+            if(engine.combo>0&&now-engine.feedbackAt<650)text(c,String.format(Locale.US,"%+d ms timing · %d ms delivery",engine.lastTimingErrorMs,engine.lastArrivalDelayMs),middle,h*.53f,13,Color.rgb(150,170,194),false);
         }
         text(c,"←                  ↓                  ↑                  →",middle,h-dp(24),16,Color.rgb(150,170,194),true);
         if(engine.started){text(c,"Score "+engine.score()+"    Best "+engine.bestCombo+"    Miss "+engine.misses,middle,h-dp(52),14,Color.rgb(200,213,230),false);}
@@ -84,10 +88,10 @@ public final class RhythmView extends View {
         if(engine.running)postInvalidateOnAnimation();
     }
     @Override public boolean onTouchEvent(MotionEvent e){
-        int action=e.getActionMasked();if(action==MotionEvent.ACTION_CANCEL){touch.clear();checkEdges();return true;}
+        int action=e.getActionMasked();if(action==MotionEvent.ACTION_CANCEL){touch.clear();checkEdges(SystemClock.uptimeMillis());return true;}
         touch.clear();int excluded=action==MotionEvent.ACTION_POINTER_UP?e.getActionIndex():-1;
         if(action!=MotionEvent.ACTION_UP)for(int i=0;i<e.getPointerCount();i++)if(i!=excluded){float x=e.getX(i);if(x>=left&&x<left+4*laneWidth)touch.add((int)((x-left)/laneWidth));}
-        checkEdges();if(action==MotionEvent.ACTION_UP)performClick();return true;
+        checkEdges(SystemClock.uptimeMillis());if(action==MotionEvent.ACTION_UP)performClick();return true;
     }
     @Override public boolean performClick(){super.performClick();return true;}
 }
