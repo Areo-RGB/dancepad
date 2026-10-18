@@ -1,0 +1,36 @@
+{
+  "SELECT": [
+    "B9"
+  ],
+  "START": [
+    "B10"
+  ],
+  "CROSS": [
+    "B7"
+  ],
+  "UP": [
+    "B3"
+  ],
+  "CIRCLE": [
+    "B8"
+  ],
+  "LEFT": [
+    "B1"
+  ],
+  "RIGHT": [
+    "B4"
+  ],
+  "CENTER": [
+    "Y+",
+    "POV down"
+  ],
+  "TRIANGLE": [
+    "B6"
+  ],
+  "DOWN": [
+    "B2"
+  ],
+  "SQUARE": [
+    "B5"
+  ]
+}

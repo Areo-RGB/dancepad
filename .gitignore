@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.log
+*.pid
+android-pad/.gradle/
+android-pad/.kotlin/
+android-pad/build/
+android-pad/app/build/
+android-pad/local.properties
