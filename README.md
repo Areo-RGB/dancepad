@@ -52,7 +52,23 @@ adb -s 4c637b9e install -r .\DancePad.apk
 - **PC bridge**: display signals forwarded from the real mat on the PC.
 - **Map real controller**: tap this, choose an area, then press its control on a directly connected Android controller. Android mappings save privately on the tablet, separately from the Windows JSON.
 
-When an OTG/data adapter is available, the mat can also be tested directly on Android. Direct USB compatibility and Android's button codes still need physical testing. The PC bridge uses the confirmed Windows button assignments. Mock signals only affect this viewer.
+The mat can also connect to Android without the PC relay. The Xiaomi Pad 7 requires the tested hub workaround below. The PC bridge uses the confirmed Windows button assignments; Android controller mappings are separate. Mock signals only affect this viewer.
+
+### Xiaomi Pad 7: USB hub workaround
+
+Tested with the **Microntek USB Joystick dance mat (`0079:0006`)**, Xiaomi Pad 7 running Android 16 / HyperOS `OS3.0.304.0.WOZEUXM`, and a GenesysLogic USB hub (`05e3:0610` USB 2 side / `05e3:0626` USB 3 side).
+
+**Working connection:** mat → USB hub → USB-C data/OTG adapter → tablet. Physical mat input was confirmed working in Dance Pad. Connecting the mat through the adapter alone repeatedly failed on this tablet.
+
+1. With USB devices disconnected, open **Settings → More connection options → OTG** (German: **Einstellungen → Mehr Verbindungsoptionen → OTG**) and enable it. Xiaomi says it turns off after 10 idle minutes.
+2. Connect the mat through the hub. In Dance Pad, leave **PC bridge** and **Mock pad** off for direct physical input.
+3. If reconnection fails, disconnect USB devices, toggle OTG off and back on, then reconnect through the hub. This restored detection without another reboot in one test. Restarting the tablet with hub and mat attached also restored operation. Neither recovery is guaranteed; keep the working hub setup connected rather than switching to a direct connection.
+
+**Why the hub helps:** the mat is a low-speed USB device. A USB 2 hub changes how its traffic reaches the tablet's host controller; a high-speed hub can translate low/full-speed transactions. This provides a compatibility workaround, not a driver installed by the hub. The precise electrical, timing, or firmware cause has **not** been established, and not every hub is guaranteed to work. Extra power has not been proven necessary.
+
+**Evidence from local diagnostics:** direct connections failed during initial USB enumeration with `device descriptor read/64, error -71`. Failed hub attempts also produced `error -32`, address-setup failures, and `unable to enumerate USB device`. After a failed direct connection, sometimes only the hub's USB 3 side returned; its USB 2 side and the mat were absent. Xiaomi's kernel also logged `could not transition HS PHY to L2` and a runtime-suspend warning in `dwc3_msm_suspend`. These are USB communication/power-management clues, not proof of a single root cause. Failure occurs before the app can identify the controller, so remapping buttons cannot fix it.
+
+For comparison, the Pixel 8 Pro detected this mat with and without the hub; the Pixel 7 failed direct enumeration but worked through the hub. The workaround is device/setup-specific, not a universal Android requirement. Wi-Fi debugging allows USB inspection while the tablet's port is occupied. An ADB bug report included Xiaomi kernel logs even though direct `adb shell dmesg` was denied; root, Shizuku, and Termux were not needed. Do not commit full bug reports, which contain private device information.
 
 ## Arrow practice mode
 
